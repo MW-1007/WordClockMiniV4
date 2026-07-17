@@ -30,14 +30,17 @@ The clock comes in 3 color variants: white, black and stainless steel
 
 ### Custom PCB
 
-![PCB](images/WordClockPCBFront.svg)
-
-![PCB](images/WordClockPCBBack.svg)
+<p align="center">
+  <img src="images/WordClockPCBFront.svg" width="48%" alt="PCB Front" />
+  <img src="images/WordClockPCBBack.svg" width="48%" alt="PCB Back" />
+</p>
 
 ### Built-in Configuration Interface
 
-![Web Interface](images/WebUI1.jpg)
-![Web Interface](images/WebUI2.jpg)
+<p align="center">
+  <img src="images/WebUI1.jpg" width="48%" alt="WebUI" />
+  <img src="images/WebUI2.jpg" width="48%" alt="WebUI" />
+</p>
 
 ---
 
