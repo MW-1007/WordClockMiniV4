@@ -1,3 +1,31 @@
+/**
+ * @file WordClockApp.cpp
+ * @brief Main application implementation for the WordClock Mini V4.
+ *
+ * This translation unit coordinates the complete device lifecycle:
+ *
+ * - persistent configuration storage in ESP32 NVS
+ * - Wi-Fi provisioning for WPA2-Personal and WPA2-Enterprise networks
+ * - NTP synchronization and timezone handling
+ * - a captive configuration portal with live LED preview
+ * - OTA firmware updates through ElegantOTA
+ * - word-clock rendering on a 10 x 10 WS2812 LED matrix
+ * - gamma-corrected frame transitions and brightness fades
+ * - BH1750 ambient-light measurements and automatic brightness control
+ * - configurable night mode behaviour
+ * - button handling, deep sleep and timed wake-up
+ *
+ * The implementation is intentionally kept behind the small public interface
+ * declared in WordClockApp.h. PlatformIO calls wordClockSetup() and
+ * wordClockLoop() from src/main.cpp.
+ *
+ * @note Wi-Fi credentials and application settings are stored separately in
+ *       NVS namespaces named "wifi" and "wordclk".
+ * @note WPA2-Enterprise is currently configured without CA certificate
+ *       validation. This is convenient for some institutional networks, but
+ *       it does not authenticate the network's identity.
+ */
+
 #include <Arduino.h>
 #include "HardwareConfig.h"
 #include "TimezoneMapper.h"
@@ -28,16 +56,44 @@
 #include "page_html.h"        // contains PAGE_HTML PROGMEM
 
 // -------------------- Hardware --------------------
+/**
+ * Global NeoPixel driver for the physical 10 x 10 display.
+ *
+ * Frame buffers in this file store colors in the same packed format returned
+ * by Adafruit_NeoPixel::Color(). Brightness is applied in software before a
+ * frame is transferred to the strip.
+ */
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
-// -------------------- Persistente Settings --------------------
+// -------------------- Persistent application settings --------------------
+/**
+ * Available frame transition strategies.
+ *
+ * FADE_OFF updates the target frame immediately. FADE_2PHASE first removes
+ * obsolete words and then introduces new words. FADE_CROSS interpolates the
+ * complete frame, while FADE_WIPE staggers the transition by matrix column.
+ */
 enum FadeMode : uint8_t { FADE_OFF = 0, FADE_2PHASE = 1, FADE_CROSS = 2, FADE_WIPE = 3 };
 
+/**
+ * Reduced-display behaviour used while night mode is active.
+ *
+ * NM_DOTS_ONLY keeps the normal words but suppresses the four minute dots.
+ * NM_HALF_HOUR_ONLY reduces the displayed time to full and half hours.
+ * NM_NOTHING turns the display off completely.
+ */
 enum NightModeBehavior : uint8_t { NM_DOTS_ONLY = 0, NM_HALF_HOUR_ONLY = 1 , NM_NOTHING = 2 };
 
 static const uint32_t CFG_MAGIC   = 0x57434C4B; // 'WCLK'
 static const uint16_t CFG_VERSION = 10;
 
+/**
+ * @brief Versioned configuration persisted as a binary blob in NVS.
+ *
+ * CFG_MAGIC detects unrelated or corrupt data, while CFG_VERSION invalidates
+ * layouts from older firmware revisions. Whenever this structure changes,
+ * CFG_VERSION must be incremented because the stored byte layout changes.
+ */
 struct Settings {
   uint32_t magic;
   uint16_t version;
@@ -85,9 +141,21 @@ static Settings cfg;
 static Preferences prefsCfg;
 static Preferences prefsWifi;
 
-// -------------------- WiFi Credentials (PSK vs Enterprise) --------------------
+// -------------------- Wi-Fi credentials (PSK vs Enterprise) --------------------
+/**
+ * Credentials are stored separately from display settings so network changes
+ * do not affect the versioned Settings binary layout.
+ */
 enum WifiMode : uint8_t { WIFI_MODE_PSK = 0, WIFI_MODE_ENTERPRISE = 1 };
 
+/**
+ * @brief Runtime representation of either WPA2-Personal or WPA2-Enterprise
+ *        credentials.
+ *
+ * Passwords are never returned by the configuration API. Empty password fields
+ * submitted by the portal may reuse an existing saved password for the same
+ * SSID and authentication mode.
+ */
 struct WifiCreds {
   WifiMode mode = WIFI_MODE_PSK;
   String ssid;
@@ -134,7 +202,12 @@ static void saveWifiCredsEx(const WifiCreds &in) {
   prefsWifi.end();
 }
 
-// -------------------- Portal globals --------------------
+// -------------------- Configuration portal state --------------------
+/**
+ * The portal runs an HTTP server and wildcard DNS server while the ESP32 acts
+ * as an access point. A separate preview configuration is maintained in RAM so
+ * users can inspect visual changes before committing them to NVS.
+ */
 static WebServer server(80);
 static DNSServer dnsServer;
 
@@ -168,7 +241,8 @@ static bool g_pendingCredsValid = false;
 
 static uint32_t g_saveTimeoutMs = 20000;
 
-// -------------------- Framebuffer --------------------
+// -------------------- Display framebuffer --------------------
+/** Last rendered raw frame and the brightness currently applied to it. */
 static uint32_t g_current[LED_COUNT];
 static bool g_hasCurrent = false;
 
@@ -176,7 +250,11 @@ static bool g_hasCurrent = false;
 static uint8_t g_briNow    = 255;
 static uint8_t g_briTarget = 255;
 
-// -------------------- Connection / NTP Status --------------------
+// -------------------- Connection and NTP status --------------------
+/**
+ * Repeated Wi-Fi failures enable a red SETUP overlay. NTP state is shared with
+ * the asynchronous SNTP callback, therefore the completion flag is volatile.
+ */
 static uint8_t wifiFailCount = 0;
 static bool wifiFailOverlay = false;
 static time_t lastNTPSyncEpoch = 0;
@@ -189,7 +267,12 @@ static void timeSyncNotificationCallback(struct timeval *tv) {
   lastNTPSyncEpoch = time(nullptr);
 }
 
-// -------------------- BH1750 Auto-Brightness --------------------
+// -------------------- BH1750 automatic brightness state --------------------
+/**
+ * The sensor is read in one-shot high-resolution mode. The driver can re-run
+ * its DVI reset and I2C initialization sequence after deep sleep or a failed
+ * transaction.
+ */
 static bool     g_bhOk = false;
 static uint8_t  g_bhAddr = 0x23;
 
@@ -209,7 +292,7 @@ static const uint32_t PORTAL_LUX_POLL_MS = 2000;
 // -------------------- Forward declarations --------------------
 static void markPortalClientSeen();
 
-// -------------------- Utils --------------------
+// -------------------- Parsing, color and interpolation utilities --------------------
 static bool strToU16(const String& s, uint16_t &out) {
   char *endptr = nullptr;
   long v = strtol(s.c_str(), &endptr, 10);
@@ -303,6 +386,13 @@ static inline uint8_t linear_to_srgb8(float x) {
   float s = powf(x, 1.0f / 2.2f);
   return (uint8_t)lroundf(s * 255.0f);
 }
+/**
+ * Interpolates two RGB colors in approximately linear-light space.
+ *
+ * Direct interpolation of sRGB channels produces visibly dark midpoints.
+ * Converting the channels to linear space before interpolation creates smoother
+ * and more natural LED fades.
+ */
 static uint32_t lerpColorGamma(uint32_t c0, uint32_t c1, float t) {
   uint8_t r0=(c0>>16)&255, g0=(c0>>8)&255, b0=c0&255;
   uint8_t r1=(c1>>16)&255, g1=(c1>>8)&255, b1=c1&255;
@@ -317,7 +407,13 @@ static uint32_t lerpColorGamma(uint32_t c0, uint32_t c1, float t) {
   return strip.Color(linear_to_srgb8(R), linear_to_srgb8(G), linear_to_srgb8(B));
 }
 
-// --- Perceived normalization ---
+/**
+ * Limits the perceived luminance of saturated colors.
+ *
+ * Green LEDs appear much brighter than red or blue at identical channel values.
+ * This normalization scales only colors above the requested luma target and
+ * therefore avoids unexpectedly amplifying dark colors.
+ */
 static uint32_t normalizePerceived(uint32_t rgb, float targetLuma = 0.35f) {
   float r = ((rgb >> 16) & 0xFF) / 255.0f;
   float g = ((rgb >> 8)  & 0xFF) / 255.0f;
@@ -368,7 +464,12 @@ static inline uint32_t applyBrightnessMin1(uint32_t c, uint8_t bri) {
   return strip.Color(r, g, b);
 }
 
-// ---------- Clamps (now works for cfg and previewCfg) ----------
+/**
+ * Sanitizes settings received from NVS or the web portal.
+ *
+ * The same function is used for persisted and preview settings so both paths
+ * follow identical limits and enum validation rules.
+ */
 static void applyClamps(Settings& s) {
   s.fadeMs = snapFadeMs(s.fadeMs);
   if (s.maxBrightness < 1) s.maxBrightness = 1;
@@ -393,14 +494,20 @@ static void applyClamps(Settings& s) {
 }
 static void applyRuntimeClamps() { applyClamps(cfg); }
 
-// -------------------- Timezone --------------------
+// -------------------- Timezone handling --------------------
+/** Applies the configured IANA timezone through its POSIX mapping. */
 static void applyTimezone() {
   const char* posix = tzPosixFromIana(cfg.tzName);
   setenv("TZ", posix, 1);
   tzset();
 }
 
-// -------------------- Settings load/save --------------------
+// -------------------- Persistent settings --------------------
+/**
+ * Settings are saved as a single versioned binary object. Invalid size, magic
+ * or version causes the caller to restore defaults instead of interpreting an
+ * incompatible layout.
+ */
 static void setDefaultSettings() {
   memset(&cfg, 0, sizeof(cfg));
   cfg.magic = CFG_MAGIC;
@@ -484,7 +591,12 @@ static void noteWifiAttemptResult(bool ok) {
   }
 }
 
-// -------------------- NTP --------------------
+// -------------------- Network time synchronization --------------------
+/**
+ * SNTP uses three public servers for resilience. The callback records the last
+ * successful synchronization time, while syncTimeNTP() provides a bounded
+ * blocking wait for startup and explicitly requested synchronization.
+ */
 static void initNTP() {
   const char* posix = tzPosixFromIana(cfg.tzName);
 
@@ -534,7 +646,12 @@ static bool needsNtpSync() {
   return (now - lastNTPSyncEpoch) >= interval;
 }
 
-// -------------------- WordClock helpers --------------------
+// -------------------- Word-clock rendering helpers --------------------
+/**
+ * The physical face is represented as a row-major 10 x 10 matrix. Rendering
+ * functions write a complete target frame; animation is handled separately by
+ * the fade engine.
+ */
 static inline void setIdxBuf(uint32_t* buf, uint16_t idx, uint32_t c) {
   if (idx < LED_COUNT) buf[idx] = c;
 }
@@ -567,7 +684,12 @@ static bool waitReleaseDebounced(int pin, uint16_t stableMs = 25) {
   }
 }
 
-// -------------------- Wort-Mappings --------------------
+// -------------------- Word-to-matrix mappings --------------------
+/**
+ * Each helper maps one printed German word to its row, starting column and
+ * length on the 10 x 10 face. Separate mappings are used where the same text
+ * appears at multiple positions, for example minute "ZEHN" and hour "ZEHN".
+ */
 static void W_FUENF(uint32_t* b, uint32_t c)   { lightRangeBuf(b, 0, 1, 4, c); }
 static void W_ZEHN(uint32_t* b, uint32_t c)    { lightRangeBuf(b, 0, 5, 4, c); }
 static void W_VIERTEL(uint32_t* b, uint32_t c) { lightRangeBuf(b, 1, 3, 7, c); }
@@ -617,6 +739,14 @@ static void drawSetupOverlay(uint32_t* frame, uint32_t rgb) {
   W_UP(frame, c);
 }
 
+/**
+ * Builds a complete LED frame for a given local time.
+ *
+ * Time is rounded down to the previous five-minute phrase. The remainder is
+ * represented by up to four corner LEDs. German expressions after 25 minutes
+ * refer to the following hour, which is why both current and next-hour indices
+ * are calculated.
+ */
 static void renderWordClockWith(const Settings& s, uint8_t hour24, uint8_t minute, uint32_t* out) {
   for (int i = 0; i < LED_COUNT; i++) out[i] = 0;
 
@@ -686,7 +816,13 @@ static void renderWordClockWith(const Settings& s, uint8_t hour24, uint8_t minut
   }
 }
 
-// -------------------- Fade Engine (mit Portal-Yield) --------------------
+// -------------------- Cooperative fade engine --------------------
+/**
+ * Animation loops periodically service DNS and HTTP requests through
+ * portalYield(). This prevents the captive portal from becoming unresponsive
+ * during long fades while preserving the straightforward blocking animation
+ * implementation.
+ */
 static void portalYield(uint16_t ms) {
   const uint32_t endAt = millis() + ms;
   while ((int32_t)(millis() - endAt) < 0) {
@@ -713,6 +849,7 @@ static void showFrameInstant(const uint32_t* frameRaw, uint8_t briTo,
   fadeBrightnessOnly(briTo, baseMs, stepMs);
 }
 
+/** Cross-fades every pixel and the global brightness simultaneously. */
 static void fadeCross(const uint32_t* fromRaw, const uint32_t* toRaw,
                       uint16_t fadeMs, uint16_t stepMs,
                       uint8_t briFrom, uint8_t briTo) {
@@ -737,6 +874,12 @@ static void fadeCross(const uint32_t* fromRaw, const uint32_t* toRaw,
   }
 }
 
+/**
+ * Performs a semantic two-phase transition.
+ *
+ * Pixels that disappear fade out first. Pixels newly required by the next
+ * phrase then fade in, while unchanged letters remain stable.
+ */
 static void fade2Phase(const uint32_t* fromFrame, const uint32_t* toFrame,
                        uint16_t fadeOutMs, uint16_t fadeInMs, uint16_t stepMs,
                        uint8_t briFrom, uint8_t briTo) {
@@ -790,6 +933,12 @@ static void fade2Phase(const uint32_t* fromFrame, const uint32_t* toFrame,
   }
 }
 
+/**
+ * Performs a column-staggered wipe transition across the matrix.
+ *
+ * Outgoing and incoming words are masked independently, so letters shared by
+ * both frames remain continuously illuminated.
+ */
 static void fadeWipe(const uint32_t* fromFrame, const uint32_t* toFrame,
                      uint16_t wipeOutMs, uint16_t wipeInMs, uint16_t stepMs,
                      uint8_t briFrom, uint8_t briTo) {
@@ -873,6 +1022,7 @@ static void fadeWipe(const uint32_t* fromFrame, const uint32_t* toFrame,
   }
 }
 
+/** Selects and executes the configured transition from the current frame. */
 static void transitionToFrame(const uint32_t* targetRaw, FadeMode mode,
                               uint16_t baseMs, uint16_t stepMs,
                               uint8_t briTo) {
@@ -993,14 +1143,20 @@ static void showClockFrameWithFade(const Settings& s,
   transitionToFrame(frame, fm, s.fadeMs, s.stepMs, briTarget);
 }
 
-// -------------------- Nightmode logic --------------------
+// -------------------- Night-mode time window --------------------
+/** Supports both same-day and overnight windows such as 22:00 to 07:00. */
 static bool isWithinNightWindow(uint16_t nowMin, uint16_t startMin, uint16_t endMin) {
   if (startMin == endMin) return true; // full day window
   if (startMin < endMin) return (nowMin >= startMin && nowMin < endMin);
   return (nowMin >= startMin || nowMin < endMin);
 }
 
-// -------------------- BH1750 low-level (CONTINUOUS mode) --------------------
+// -------------------- BH1750 low-level driver --------------------
+/**
+ * Despite the historical section name, measurements use one-shot
+ * high-resolution mode. One-shot operation reduces power consumption and avoids
+ * leaving the sensor in an undefined state across ESP32 deep-sleep cycles.
+ */
 static void bh1750DviResetSequence() {
   pinMode(BH1750_DVI_PIN, OUTPUT);
   digitalWrite(BH1750_DVI_PIN, LOW);
@@ -1055,6 +1211,12 @@ static bool bh1750Init() {
   return true;
 }
 
+/**
+ * Performs one robust lux measurement.
+ *
+ * A failed command or short I2C read triggers one full sensor reinitialization
+ * before the function reports failure to the caller.
+ */
 static bool bh1750ReadLux(float &luxOut) {
   // Ensure sensor is initialized
   if (!g_bhOk) {
@@ -1096,6 +1258,13 @@ static bool bh1750ReadLux(float &luxOut) {
   return true;
 }
 
+/**
+ * Maps ambient illuminance to an LED brightness value.
+ *
+ * A logarithmic lux mapping models the large dynamic range of human vision.
+ * Smoothstep softens the endpoints and a gamma curve keeps low-light output
+ * intentionally dim. The result is always constrained to [1, maxBri].
+ */
 static uint8_t luxToBrightness(float lux, uint8_t maxBri, float luxMin, float luxMax) {
   if (lux < 0.0f) lux = 0.0f;
 
@@ -1142,6 +1311,12 @@ static uint8_t computeEffectiveBrightnessForPortalPreview() {
   return bri;
 }
 
+/**
+ * Evaluates night mode using both time and ambient light.
+ *
+ * A latched state with separate on/off thresholds prevents rapid toggling when
+ * the measured illuminance fluctuates around the configured threshold.
+ */
 static bool isNightmodeActive(const struct tm& tmInfo) {
   if (!cfg.enableNightmode) { g_nightLatched = false; return false; }
 
@@ -1228,7 +1403,14 @@ static uint8_t computeTargetBrightnessWithMax(uint8_t maxBriCandidate) {
   return maxBriCandidate;
 }
 
-// -------------------- WPA2 Enterprise helpers (NO CERT CHECK) --------------------
+// -------------------- WPA2-Enterprise support --------------------
+/**
+ * Supports both current and legacy ESP-IDF enterprise APIs at compile time.
+ *
+ * @warning No CA certificate is configured, so the device does not validate
+ *          the authentication server. Credentials could be exposed to a rogue
+ *          access point imitating the configured network.
+ */
 static void wifiEnterpriseDisable() {
 #if __has_include("esp_eap_client.h")
   esp_wifi_sta_enterprise_disable();
@@ -1319,7 +1501,12 @@ static bool connectWiFiWithCredsBlockingPulsed(const WifiCreds &c, uint32_t time
   return waitForWiFiConnectWithPulse(timeoutMs, pulse);
 }
 
-// -------------------- Portal endpoints --------------------
+// -------------------- Configuration portal HTTP endpoints --------------------
+/**
+ * Endpoints expose configuration, network scanning, live preview, sensor data
+ * and asynchronous save status. Password values are deliberately omitted from
+ * responses and may only be replaced or reused through the save endpoint.
+ */
 static void markPortalClientSeen() {
   portalLastActivityMs = millis();
 
@@ -1448,6 +1635,7 @@ static void sendJson(bool ok, const String& msg) {
   server.send(ok ? 200 : 400, "application/json; charset=utf-8", j);
 }
 
+/** Applies submitted values to the RAM-only preview configuration. */
 static void handlePreview() {
   markPortalClientSeen();
   previewCfg = cfg;
@@ -1531,6 +1719,13 @@ static void handlePreview() {
   server.send(200, "application/json; charset=utf-8", "{\"ok\":true}");
 }
 
+/**
+ * Validates submitted settings and starts an asynchronous save/connect job.
+ *
+ * Network credentials are not persisted until the requested network connection
+ * succeeds. This prevents a typo from immediately replacing known-working
+ * credentials and locking the user out of the device.
+ */
 static void handleSave() {
   markPortalClientSeen();
 
@@ -1738,6 +1933,7 @@ static void handleNotFound() {
   server.send(302, "text/plain", "");
 }
 
+/** Advances the non-blocking credential validation and save state machine. */
 static void tickSaveJob() {
   if (g_saveState != SJ_CONNECTING || !g_pendingCredsValid) return;
 
@@ -1762,7 +1958,12 @@ static void tickSaveJob() {
   }
 }
 
-// -------------------- Portal Start/Run --------------------
+// -------------------- Captive portal lifecycle --------------------
+/**
+ * The portal combines an access point, wildcard DNS, HTTP configuration API,
+ * live clock preview and ElegantOTA. It exits after successful configuration or
+ * after the configured inactivity timeout.
+ */
 static void startConfigPortal() {
   portalActive = true;
   portalLastActivityMs = millis();
@@ -1893,7 +2094,11 @@ static void runConfigPortalLoop() {
   }
 }
 
-// -------------------- Boot Flow (WiFi connect else portal) --------------------
+// -------------------- Boot-time network provisioning --------------------
+/**
+ * Attempts the stored network first. Missing or invalid credentials fall back
+ * to the captive portal without requiring a separate recovery firmware image.
+ */
 static bool ensureWiFiOrPortal() {
   WifiCreds wc;
   bool have = loadWifiCredsEx(wc);
@@ -1929,7 +2134,8 @@ static bool ensureWiFiOrPortal() {
   return false;
 }
 
-// -------------------- Zeit holen (Start + alle N Stunden) --------------------
+// -------------------- Time synchronization policy --------------------
+/** Ensures Wi-Fi availability, synchronizes time, and then powers Wi-Fi down. */
 static bool ensureTimeNow() {
   WifiCreds wc;
   if (!loadWifiCredsEx(wc) || !wifiCredsLookValid(wc)) {
@@ -1954,11 +2160,13 @@ static bool ensureTimeNow() {
   return okNtp;
 }
 
+/** Configures GPIO wake sources used to leave deep sleep via a button press. */
 static void enableBtnWakeup() {
   esp_sleep_enable_gpio_wakeup();
   gpio_wakeup_enable((gpio_num_t)BTN_SETTINGS, GPIO_INTR_LOW_LEVEL);
 }
 
+/** Sleeps until shortly after the next minute boundary. */
 static void sleepUntilNextMinute(const struct tm &tmInfo) {
   int waitSec = 60 - tmInfo.tm_sec;
   if (waitSec <= 0) waitSec = 60;
@@ -1975,6 +2183,10 @@ static void sleepUntilNextMinute(const struct tm &tmInfo) {
   g_bhOk = bh1750Init();
 }
 
+/**
+ * Chooses a wake interval that balances timely lux updates with low power use
+ * while automatic brightness is enabled.
+ */
 static void sleepUntilNextWakeAuto(const struct tm &tmInfo) {
   int toNextMinute = 60 - tmInfo.tm_sec;
   if (toNextMinute <= 0) toNextMinute = 60;
@@ -1996,6 +2208,12 @@ static void sleepUntilNextWakeAuto(const struct tm &tmInfo) {
   g_bhOk = bh1750Init();
 }
 
+/**
+ * Provides a button-driven local brightness adjustment mode.
+ *
+ * This path allows basic interaction without opening the web portal. It is
+ * intentionally blocking because it represents an explicit modal user action.
+ */
 static void quickAdjustModeBlocking() {
   // start value
   uint8_t pendingMax = cfg.maxBrightness;
@@ -2118,7 +2336,11 @@ static void quickAdjustModeBlocking() {
   }
 }
 
-// -------------------- Arduino Setup/Loop --------------------
+// -------------------- Public application lifecycle --------------------
+/**
+ * Initializes hardware, restores configuration, provisions networking if
+ * necessary, synchronizes time and renders the initial clock frame.
+ */
 void wordClockSetup() {
 
   if (!loadSettings()) {
@@ -2178,6 +2400,13 @@ void wordClockSetup() {
   }
 }
 
+/**
+ * Executes one wake cycle of the clock.
+ *
+ * The loop handles button actions, time changes, periodic lux measurements,
+ * brightness hysteresis, night-mode transitions, scheduled NTP updates and the
+ * final deep-sleep decision.
+ */
 void wordClockLoop() {
 
   struct tm tmInfo;
