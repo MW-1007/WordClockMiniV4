@@ -1,0 +1,24 @@
+# PlatformIO build output
+.pio/
+
+# VS Code / PlatformIO local workspace files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+
+# Local secrets and environment files
+.env
+secrets.h
+
+# Generated firmware artifacts
+*.bin
+*.elf
+*.map
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
