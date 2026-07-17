@@ -36,7 +36,8 @@ The clock comes in 3 color variants: white, black and stainless steel
 
 ### Built-in Configuration Interface
 
-![Web Interface](images/web_ui.jpg)
+![Web Interface](images/WebUI1.jpg)
+![Web Interface](images/WebUI2.jpg)
 
 ---
 
