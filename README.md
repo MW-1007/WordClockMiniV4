@@ -1,5 +1,7 @@
 # WordClock Mini V4
 
+![Finished Clock](images/FinalProductImage.jpg)
+
 A fully custom ESP32-C3 based word clock designed and developed from scratch, including firmware, PCB design, web configuration interface, and enclosure integration.
 
 The clock displays the current time using illuminated words in a custom designed font instead of digits and automatically synchronizes with internet time servers. Configuration is handled through a built-in responsive web interface without requiring firmware modifications.
@@ -25,10 +27,6 @@ The clock comes in 3 color variants: white, black and stainless steel
 ---
 
 ## Gallery
-
-### Finished Device
-
-![Finished Clock](images/FinalProductImage.jpg)
 
 ### Custom PCB
 
