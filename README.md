@@ -39,17 +39,17 @@ The clock comes in 3 color variants: white, black and stainless steel
   <img src="images/WordClockPCBBack.svg" width="48%" alt="PCB Back" />
 </p>
 
+### CAD-Model built in Fusion
+
+<p align="center">
+  <img src="images/CADView.png" width="96%" alt="CAD-Model" />
+</p>
+
 ### Built-in Configuration Interface
 
 <p align="center">
   <img src="images/WebUI1.jpg" width="48%" alt="WebUI" />
   <img src="images/WebUI2.jpg" width="48%" alt="WebUI" />
-</p>
-
-### CAD-Model built in Fusion
-
-<p align="center">
-  <img src="images/CADView.png" width="96%" alt="CAD-Model" />
 </p>
 
 ---
