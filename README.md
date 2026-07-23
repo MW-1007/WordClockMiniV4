@@ -24,6 +24,10 @@ The clock comes in 3 color variants: white, black and stainless steel
 
 [![Making Of](images/MakingOfThumbnail.png)](https://github.com/user-attachments/assets/e9385548-6b87-468d-ab12-bdd79818bf12)
 
+### Exploded CAD View
+
+[![CAD VIEW](images/CADThumbnail.png)](https://github.com/user-attachments/assets/40dce6b3-5bbd-4252-9d69-452dc92e81c9)
+
 ---
 
 ## Gallery
@@ -40,6 +44,12 @@ The clock comes in 3 color variants: white, black and stainless steel
 <p align="center">
   <img src="images/WebUI1.jpg" width="48%" alt="WebUI" />
   <img src="images/WebUI2.jpg" width="48%" alt="WebUI" />
+</p>
+
+### CAD-Model built in Fusion
+
+<p align="center">
+  <img src="images/CADView.png" width="96%" alt="CAD-Model" />
 </p>
 
 ---
